@@ -1,0 +1,211 @@
+# ── .github/workflows/deploy-test.yml ────────────────────────────────────────
+#
+# WHAT THIS FILE IS:
+# A GitHub Actions workflow. GitHub reads every .yml file inside .github/workflows/
+# and runs them automatically based on the triggers you define.
+#
+# WHAT THIS WORKFLOW DOES:
+# Every time code is pushed to the "develop" branch, it:
+#   1. Runs lint and tests            (catches broken code early)
+#   2. Builds a Docker image          (packages your app)
+#   3. Pushes image to GHCR           (stores it in GitHub's container registry)
+#   4. SSHes into the test server     (deploys the new image automatically)
+#
+# KEY PRINCIPLE:
+# No developer manually deploys to the test server ever.
+# Code push → GitHub does everything automatically.
+
+# The display name shown in the GitHub Actions UI
+name: Deploy → Test
+
+# ── TRIGGERS ─────────────────────────────────────────────────────────────────
+# "on:" defines WHEN this workflow runs
+on:
+  push:
+    # Only trigger when code is pushed to the "develop" branch.
+    # Pushing to "main" or any feature/* branch does NOT trigger this.
+    branches: [develop]
+
+  # workflow_dispatch allows you to manually trigger this workflow
+  # from the GitHub UI (Actions tab → Run workflow button).
+  # Useful for re-deploying without making a code change.
+  workflow_dispatch:
+
+# ── ENVIRONMENT VARIABLES ─────────────────────────────────────────────────────
+# Variables available to ALL jobs in this workflow.
+# GHCR = GitHub Container Registry (where Docker images are stored for free)
+env:
+  REGISTRY: ghcr.io
+  # github.repository_owner is your GitHub username, automatically provided by GitHub.
+  # Example: if your GitHub is "saurav-samvyo", this becomes ghcr.io/saurav-samvyo/samvyo-api
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/samvyo-api
+
+# ── JOBS ──────────────────────────────────────────────────────────────────────
+# A workflow has one or more jobs. Each job runs on a separate virtual machine (runner).
+# Jobs run in PARALLEL by default. Use "needs:" to make one wait for another.
+jobs:
+
+  # ── JOB 1: lint-and-test ───────────────────────────────────────────────────
+  # This job runs FIRST. If tests fail → the other jobs never run → no bad deploy.
+  lint-and-test:
+    name: Lint & Unit Tests
+
+    # "runs-on" specifies the virtual machine GitHub provides to run this job.
+    # ubuntu-latest = a fresh Ubuntu VM spun up just for this job, then destroyed.
+    # It's free for public repos. Private repos get 2000 min/month free.
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout your code onto the runner VM.
+      # Without this, the VM has no idea what your code looks like.
+      # actions/checkout@v4 is a pre-built action made by GitHub.
+      - uses: actions/checkout@v4
+
+      # Step 2: Install Node.js on the runner VM.
+      # "cache: npm" tells GitHub to cache node_modules between runs.
+      # This makes subsequent runs faster (skips re-downloading packages).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Step 3: Install dependencies.
+      # "npm ci" (clean install) is faster and stricter than "npm install".
+      # It uses package-lock.json exactly — no version drift.
+      - run: npm ci
+
+      # Step 4: Run the linter.
+      # Linting catches code style issues, unused variables, syntax errors.
+      # If this exits non-zero → job fails → no deployment happens.
+      - run: npm run lint
+
+      # Step 5: Run unit tests.
+      # Same principle — if tests fail, deployment is blocked.
+      - run: npm test
+
+  # ── JOB 2: build-and-push ──────────────────────────────────────────────────
+  # Builds the Docker image and pushes it to GHCR.
+  # Only runs AFTER lint-and-test passes (see "needs:").
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+
+    # "needs:" creates a dependency. This job waits for lint-and-test to succeed.
+    # If lint-and-test fails → this job is skipped entirely.
+    needs: lint-and-test
+
+    # Permissions this job needs.
+    # By default GitHub Actions has read-only access.
+    # "packages: write" allows pushing images to GHCR.
+    permissions:
+      contents: read
+      packages: write
+
+    # "outputs" lets this job pass data to the next job.
+    # Here we pass the Docker image tag so deploy-test knows what to pull.
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Log in to GitHub Container Registry (GHCR).
+      # github.actor = the GitHub username that triggered this push.
+      # secrets.GITHUB_TOKEN = automatically created by GitHub for every run.
+      # No setup needed for GITHUB_TOKEN — GitHub injects it automatically.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Generate Docker image tags automatically.
+      # This creates two tags for the image:
+      #   1. ghcr.io/your-username/samvyo-api:develop  (branch name)
+      #   2. ghcr.io/your-username/samvyo-api:sha-a1b2c3d  (exact git commit SHA)
+      #
+      # WHY TWO TAGS?
+      # "develop" tag is always the latest from develop branch (easy to reference).
+      # "sha-a1b2c3d" tag is pinned to an exact commit (used for rollbacks).
+      # If the new deploy breaks, you roll back by deploying the previous SHA tag.
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+
+      # Build the Docker image using your Dockerfile and push it to GHCR.
+      # cache-from/cache-to: GitHub caches Docker layers between runs.
+      # This means unchanged layers (like node_modules) are not rebuilt every time.
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── JOB 3: deploy-test ─────────────────────────────────────────────────────
+  # SSHes into the test server and deploys the new Docker image.
+  # Only runs AFTER build-and-push succeeds.
+  deploy-test:
+    name: Deploy to Test Server
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    # "environment: test" links this job to a GitHub Environment called "test".
+    # GitHub Environments let you add protection rules (e.g. require approval)
+    # and scope secrets to specific environments.
+    environment: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # SSH into the test server and run deployment commands.
+      # appleboy/ssh-action is a popular open-source action for SSH deploys.
+      #
+      # SECRETS USED HERE (set in GitHub → Settings → Secrets → Actions):
+      #   TEST_SSH_HOST        = IP address or hostname of your test server
+      #                          e.g. "68.183.92.11" or "test.samvyo.dev"
+      #   TEST_SSH_USER        = Linux user on the server
+      #                          e.g. "ubuntu" (default for AWS Ubuntu instances)
+      #   TEST_SSH_PRIVATE_KEY = contents of your SSH private key file
+      #                          e.g. contents of ~/.ssh/samvyo_intern
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.TEST_SSH_HOST }}
+          username: ${{ secrets.TEST_SSH_USER }}
+          key: ${{ secrets.TEST_SSH_PRIVATE_KEY }}
+
+          # These commands run ON THE TEST SERVER (not on the GitHub runner).
+          # The server must have Docker, Docker Compose, and git installed.
+          script: |
+            # Go to the project directory on the server
+            cd /opt/samvyo
+
+            # Pull the latest docker-compose.yml and other files from develop
+            git pull origin develop
+
+            # Tell Docker Compose which image tag to use.
+            # github.sha is the exact git commit hash that triggered this workflow.
+            # Example: sha-a1b2c3d4e5f6...
+            # This pins the deploy to an exact version — not just "latest".
+            export IMAGE_TAG=sha-${{ github.sha }}
+
+            # Pull ONLY the new samvyo-api image (not postgres/redis — they don't change)
+            docker compose pull samvyo-api
+
+            # Restart ONLY the samvyo-api container with the new image.
+            # --no-deps = don't restart postgres/redis (they're already healthy)
+            docker compose up -d --no-deps samvyo-api
+
+            # Delete old unused images to free up disk space.
+            # Without this, every deploy leaves old images on disk.
+            docker image prune -f
