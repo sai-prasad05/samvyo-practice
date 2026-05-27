@@ -1,0 +1,13 @@
+# === NEVER COMMIT THESE ===
+.env
+.env.local
+.env.production
+*.pem
+*.key
+
+# Node
+node_modules/
+dist/
+
+# OS noise
+.DS_Store

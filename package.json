@@ -1,0 +1,16 @@
+{
+  "name": "samvyo-api",
+  "version": "1.0.0",
+  "description": "Samvyo API — Day 3 DevOps Training",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo 'Tests will be added on Day 4' && exit 0",
+    "lint": "echo 'Linting will be added on Day 4' && exit 0"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "ioredis": "^5.3.2",
+    "pg": "^8.11.3"
+  }
+}

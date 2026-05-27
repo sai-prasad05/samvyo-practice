@@ -1,0 +1,188 @@
+# ── docker-compose.yml (test / staging environment) ──────────────────────────
+#
+# GOAL: One command — "docker compose up -d" — starts the entire Samvyo stack:
+#   nginx  →  samvyo-api  →  postgres
+#                         →  redis
+#
+# The arrow shows the dependency chain. Docker Compose respects it via
+# "depends_on + condition: service_healthy".
+
+# Compose file format version. "3.9" supports all features we use here.
+version: "3.9"
+
+# ── YAML Anchor ──────────────────────────────────────────────────────────────
+# "&common-env" defines a reusable block (like a variable in YAML).
+# Any service that writes "<<: *common-env" gets these keys merged in.
+# We use it to avoid repeating restart and logging config in every service.
+x-common-env: &common-env
+  # If the server reboots or Docker daemon restarts, bring containers back up.
+  # "unless-stopped" means: start on boot, UNLESS we manually ran "docker stop".
+  restart: unless-stopped
+
+  # Log config: Docker captures everything your app prints to stdout/stderr.
+  # json-file is the default driver (writes to /var/lib/docker/containers/...)
+  # max-size: rotate log file when it hits 50 MB
+  # max-file: keep at most 5 rotated files → max 250 MB total per service
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+# ── Services ─────────────────────────────────────────────────────────────────
+# Each entry under "services:" becomes one container.
+services:
+
+  # ── 1. nginx ───────────────────────────────────────────────────────────────
+  # Nginx is the entry point. All HTTP traffic comes in here first.
+  nginx:
+    image: nginx:alpine            # Use the official Alpine-based Nginx image
+    <<: *common-env                # Merge restart + logging from the anchor above
+
+    ports:
+      # "host_port:container_port"
+      # 8080:80 means: your machine's port 8080 maps to Nginx's port 80 inside Docker.
+      # You access the app at http://localhost:8080
+      # We use 8080 because port 80 is already taken by another service on this machine.
+      # In production on a clean server you would use 80:80 (or 443:443 with TLS).
+      - "8080:80"
+
+    volumes:
+      # Mount our custom config file INTO the container at the path Nginx reads.
+      # ":ro" = read-only. The container can read it but cannot modify it.
+      # This is safer than baking the config into a custom image.
+      - ./nginx/test.conf:/etc/nginx/conf.d/default.conf:ro
+
+    depends_on:
+      # Nginx should only start AFTER samvyo-api is healthy.
+      # "service_healthy" means Docker waits until the healthcheck below passes.
+      # Without this, Nginx starts, tries to proxy to samvyo-api, gets 502 errors
+      # because samvyo-api is still connecting to postgres.
+      samvyo-api:
+        condition: service_healthy
+
+    networks: [samvyo-net]         # Join the internal Docker network (see bottom)
+
+  # ── 2. samvyo-api ──────────────────────────────────────────────────────────
+  # Our Node.js application server. Built from the Dockerfile in this directory.
+  samvyo-api:
+    <<: *common-env
+
+    # "build: ." means: build an image using the Dockerfile in the current directory.
+    # In real production this would be: image: ghcr.io/samvyo/api:${IMAGE_TAG}
+    # (a pre-built image pulled from GitHub Container Registry)
+    build: .
+
+    # Environment variables injected into the container at runtime.
+    # ${PG_PASSWORD} and ${REDIS_PASSWORD} are read from the .env file.
+    # Docker Compose automatically reads .env from the same directory.
+    environment:
+      NODE_ENV: test
+
+      # The app connects to postgres by service name, NOT by IP or "localhost".
+      # "localhost" inside the container means the container itself.
+      # "postgres" is resolved by Docker's internal DNS to the postgres container.
+      DATABASE_URL: postgresql://samvyo:${PG_PASSWORD}@postgres:5432/samvyo
+
+      # Same principle — "redis" resolves to the redis container.
+      # The URL format: redis://:password@host:port
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+
+    # ── Healthcheck ────────────────────────────────────────────────────────
+    # Docker runs this command inside the container periodically.
+    # If it exits 0 → healthy. If it exits non-zero → unhealthy.
+    # "wget -qO-" fetches the URL quietly and prints response to stdout.
+    # This is how nginx knows samvyo-api is actually ready to serve traffic.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s      # Check every 30 seconds
+      timeout: 10s       # If check takes longer than 10s, treat as failure
+      retries: 3         # Mark unhealthy only after 3 consecutive failures
+      start_period: 20s  # Grace period on startup — don't count early failures
+
+    depends_on:
+      # samvyo-api must wait for BOTH postgres AND redis to be healthy.
+      # Without this, the app starts, tries to connect to postgres, gets
+      # ECONNREFUSED, crashes, and PM2/Docker restarts it in a loop.
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+
+    networks: [samvyo-net]
+
+  # ── 3. postgres ────────────────────────────────────────────────────────────
+  postgres:
+    <<: *common-env
+    image: postgres:16-alpine      # Official Postgres 16 on Alpine Linux
+
+    environment:
+      POSTGRES_DB:       samvyo         # Creates this database on first start
+      POSTGRES_USER:     samvyo         # Creates this user
+      POSTGRES_PASSWORD: ${PG_PASSWORD} # Uses the password from .env
+
+    volumes:
+      # ── Data volume ───────────────────────────────────────────────────────
+      # "pg_data" is a named Docker volume (defined at the bottom of this file).
+      # It maps to /var/lib/postgresql/data inside the container.
+      # WHY: Containers are ephemeral — if you remove the container, ALL data
+      # inside it is gone. A named volume lives OUTSIDE the container on the
+      # host disk. You can destroy and recreate the container, the data survives.
+      - pg_data:/var/lib/postgresql/data
+
+      # ── Init scripts ──────────────────────────────────────────────────────
+      # Any .sql file here runs automatically the FIRST time postgres starts
+      # (only when pg_data volume is empty / fresh). This is how we create
+      # our schema without manually connecting and running SQL.
+      # ":ro" = Postgres can read it but not modify it.
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+
+    healthcheck:
+      # pg_isready is a built-in Postgres CLI tool.
+      # It exits 0 only when Postgres is accepting connections.
+      # "CMD-SHELL" runs the command in a shell (vs CMD which bypasses shell).
+      test: ["CMD-SHELL", "pg_isready -U samvyo"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    networks: [samvyo-net]
+
+  # ── 4. redis ───────────────────────────────────────────────────────────────
+  redis:
+    <<: *common-env
+    image: redis:7-alpine
+
+    # Override the default Redis start command to:
+    #   --requirepass    → require authentication (no password = anyone can connect)
+    #   --appendonly yes → enable AOF persistence (writes survive Redis restart)
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+
+    volumes:
+      # Same principle as postgres — data lives outside the container.
+      - redis_data:/data
+
+    healthcheck:
+      # redis-cli ping → Redis replies "PONG" if it's alive and ready.
+      # "-a" provides the auth password (same from .env).
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    networks: [samvyo-net]
+
+# ── Named Volumes ─────────────────────────────────────────────────────────────
+# Declaring volumes here tells Docker to create and manage them.
+# Data lives at: /var/lib/docker/volumes/samvyo-practice_pg_data/_data
+# (prefix is the project name = directory name)
+# You can inspect with: docker volume inspect samvyo-practice_pg_data
+volumes:
+  pg_data:
+  redis_data:
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+# A custom bridge network isolates our containers from other Docker projects.
+# Containers on the same network can reach each other by service name.
+# Containers NOT on this network cannot reach them — good for security.
+networks:
+  samvyo-net:
+    driver: bridge
