@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo 'Tests will be added on Day 4' && exit 0",
+    "test": "node --check server.js && echo 'Syntax check passed'",
     "lint": "echo 'Linting will be added on Day 4' && exit 0"
   },
   "dependencies": {
