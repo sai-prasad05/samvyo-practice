@@ -150,8 +150,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # cache-from/cache-to removed — type=gha requires containerd driver
+          # which GitHub's default runner does not have enabled
 
   # ── JOB 3: deploy-test ─────────────────────────────────────────────────────
   # SSHes into the test server and deploys the new Docker image.
