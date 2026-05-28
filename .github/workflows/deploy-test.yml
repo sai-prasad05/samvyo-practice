@@ -97,9 +97,11 @@ jobs:
     # Permissions this job needs.
     # By default GitHub Actions has read-only access.
     # "packages: write" allows pushing images to GHCR.
+    # "actions: write"  allows reading/writing the GHA cache (needed for type=gha Docker cache)
     permissions:
       contents: read
       packages: write
+      actions: write
 
     # "outputs" lets this job pass data to the next job.
     # Here we pass the Docker image tag so deploy-test knows what to pull.
