@@ -20,7 +20,7 @@ const redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379", {
 
 // /health — is the app alive?
 app.get("/health", (req, res) => {
-  const broken = {   // ← intentional syntax error: object never closed
+   
   res.json({
     status: "ok",
     service: "samvyo-api",
