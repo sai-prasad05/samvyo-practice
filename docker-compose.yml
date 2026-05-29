@@ -41,11 +41,18 @@ services:
 
     ports:
       # "host_port:container_port"
-      # 8080:80 means: your machine's port 8080 maps to Nginx's port 80 inside Docker.
-      # You access the app at http://localhost:8080
-      # We use 8080 because port 80 is already taken by another service on this machine.
-      # In production on a clean server you would use 80:80 (or 443:443 with TLS).
-      - "8080:80"
+      # 80:80 means: the server's port 80 maps to Nginx's port 80 inside Docker.
+      #
+      # WHY port 80?
+      # Port 80 is the default HTTP port. When someone visits http://YOUR_SERVER_IP
+      # in a browser, the browser automatically connects to port 80.
+      # No need to type http://YOUR_SERVER_IP:3000 — just the IP is enough.
+      #
+      # NOTE: During local development we used 8080:80 because port 80 was already
+      # taken on your laptop. The CEO's server has a clean port 80 — so we use it.
+      #
+      # In production (Day 6) this becomes 443:443 (HTTPS) with TLS certificates.
+      - "80:80"
 
     volumes:
       # Mount our custom config file INTO the container at the path Nginx reads.
