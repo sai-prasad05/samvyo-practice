@@ -7,9 +7,6 @@
 # The arrow shows the dependency chain. Docker Compose respects it via
 # "depends_on + condition: service_healthy".
 
-# Compose file format version. "3.9" supports all features we use here.
-version: "3.9"
-
 # ── YAML Anchor ──────────────────────────────────────────────────────────────
 # "&common-env" defines a reusable block (like a variable in YAML).
 # Any service that writes "<<: *common-env" gets these keys merged in.
