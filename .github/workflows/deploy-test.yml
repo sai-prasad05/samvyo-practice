@@ -201,12 +201,14 @@ jobs:
             # This pins the deploy to an exact version — not just "latest".
             export IMAGE_TAG=sha-${{ github.sha }}
 
-            # Pull ONLY the new samvyo-api image (not postgres/redis — they don't change)
-            docker compose pull samvyo-api
-
-            # Restart ONLY the samvyo-api container with the new image.
+            # Rebuild and restart ONLY the samvyo-api container.
+            # --build   = rebuild the Docker image from the updated Dockerfile + code.
+            #             Without this, Docker reuses the old image even after git pull.
+            #             The new server.js would be on disk but the container still
+            #             runs the old code — which is exactly why the homepage wasn't
+            #             showing after the last deploy.
             # --no-deps = don't restart postgres/redis (they're already healthy)
-            docker compose up -d --no-deps samvyo-api
+            docker compose up -d --no-deps --build samvyo-api
 
             # Delete old unused images to free up disk space.
             # Without this, every deploy leaves old images on disk.
