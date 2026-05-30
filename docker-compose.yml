@@ -67,7 +67,36 @@ services:
 
     networks: [samvyo-net]         # Join the internal Docker network (see bottom)
 
-  # ── 2. samvyo-api ──────────────────────────────────────────────────────────
+  # ── 2. pgbouncer ───────────────────────────────────────────────────────────
+  # Connection pooler — sits between samvyo-api and postgres.
+  # samvyo-api connects to pgbouncer:5433 (not postgres:5432 directly).
+  # PgBouncer funnels all app connections into a small pool of real DB connections.
+  pgbouncer:
+    <<: *common-env
+    image: edoburu/pgbouncer:latest   # Lightweight PgBouncer Docker image
+
+    environment:
+      # These must match your .env file and userlist.txt
+      DB_HOST: postgres               # Docker DNS — resolves to the postgres container
+      DB_PORT: 5432
+      DB_USER: samvyo
+      DB_PASSWORD: ${PG_PASSWORD}
+      DB_NAME: samvyo
+      POOL_MODE: transaction          # Release connection after each query
+      MAX_CLIENT_CONN: 200
+      DEFAULT_POOL_SIZE: 20
+
+    volumes:
+      # Mount our config files into the container
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+
+    depends_on:
+      postgres: { condition: service_healthy }  # Wait for postgres to be ready first
+
+    networks: [samvyo-net]
+
+  # ── 3. samvyo-api ──────────────────────────────────────────────────────────
   # Our Node.js application server. Built from the Dockerfile in this directory.
   samvyo-api:
     <<: *common-env
@@ -83,10 +112,11 @@ services:
     environment:
       NODE_ENV: test
 
-      # The app connects to postgres by service name, NOT by IP or "localhost".
-      # "localhost" inside the container means the container itself.
-      # "postgres" is resolved by Docker's internal DNS to the postgres container.
-      DATABASE_URL: postgresql://samvyo:${PG_PASSWORD}@postgres:5432/samvyo
+      # Connect to pgbouncer:5433, NOT postgres:5432 directly.
+      # PgBouncer pools our connections before they reach PostgreSQL.
+      # From the app's perspective it looks identical — same SQL, same responses.
+      # The only difference: port 5433 instead of 5432.
+      DATABASE_URL: postgresql://samvyo:${PG_PASSWORD}@pgbouncer:5433/samvyo
 
       # Same principle — "redis" resolves to the redis container.
       # The URL format: redis://:password@host:port
@@ -130,6 +160,10 @@ services:
       # The database is never exposed directly to the public internet.
       - "127.0.0.1:5432:5432"
 
+    # Tell PostgreSQL to load our custom config file instead of defaults.
+    # Without this line, the mounted file is there but PostgreSQL ignores it.
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+
     environment:
       POSTGRES_DB:       samvyo         # Creates this database on first start
       POSTGRES_USER:     samvyo         # Creates this user
@@ -143,6 +177,13 @@ services:
       # inside it is gone. A named volume lives OUTSIDE the container on the
       # host disk. You can destroy and recreate the container, the data survives.
       - pg_data:/var/lib/postgresql/data
+
+      # ── Performance tuning config ─────────────────────────────────────────
+      # Mount our custom postgresql.conf into the container.
+      # PostgreSQL reads this file on startup for all its settings.
+      # Without this mount, PostgreSQL uses its conservative built-in defaults.
+      # ":ro" = read-only. Container can read the config but not modify it.
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
 
       # ── Init scripts ──────────────────────────────────────────────────────
       # Any .sql file here runs automatically the FIRST time postgres starts
@@ -167,10 +208,44 @@ services:
     <<: *common-env
     image: redis:7-alpine
 
-    # Override the default Redis start command to:
-    #   --requirepass    → require authentication (no password = anyone can connect)
-    #   --appendonly yes → enable AOF persistence (writes survive Redis restart)
-    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    # Production-hardened Redis startup command.
+    # Each flag explained:
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+
+      # --requirepass         → require password auth. Without this anyone who
+      #                         reaches the Redis port can read/delete all data.
+
+      # --appendonly yes      → enable AOF (Append Only File) persistence.
+      #                         Every write is logged to appendonly.aof on disk.
+      #                         On restart Redis replays the file → no data lost.
+      #                         Without this: Redis restart = all sessions wiped,
+      #                         all users logged out simultaneously.
+
+      # --appendfsync everysec → flush AOF file to disk every 1 second.
+      #                         Best balance: at most 1 second of data lost on
+      #                         crash. "always" is safer but 10x slower.
+      #                         "no" is fastest but loses all data since last sync.
+
+      # --maxmemory 1gb       → hard cap Redis at 1GB RAM on our 8GB server.
+      #                         Without this Redis grows until the OS kills it
+      #                         (or kills your Node.js app to free memory).
+      #                         1GB is generous for sessions + cache at test scale.
+
+      # --maxmemory-policy allkeys-lru → when 1GB is reached, evict the Least
+      #                         Recently Used keys first. Active user sessions
+      #                         (accessed constantly) survive. Stale cached API
+      #                         responses (not touched in hours) get removed.
+
+      # --save 900 1          → also write an RDB snapshot every 15 minutes if
+      #                         at least 1 key changed. RDB = full point-in-time
+      #                         snapshot. Works alongside AOF as a second safety net.
 
     volumes:
       # Same principle as postgres — data lives outside the container.
