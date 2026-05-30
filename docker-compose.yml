@@ -209,7 +209,19 @@ services:
     image: redis:7-alpine
 
     # Production-hardened Redis startup command.
-    # Each flag explained:
+    # Comments must be OUTSIDE the command block — Redis can't parse # in args.
+    #
+    # --requirepass         → require password (no password = anyone can connect)
+    # --appendonly yes      → AOF persistence: every write logged to disk.
+    #                         On restart Redis replays the log → no data lost.
+    # --appendfsync everysec → flush AOF to disk every 1 second.
+    #                         At most 1 second of data lost on crash.
+    # --maxmemory 1gb       → hard cap at 1GB (our server has 8GB total).
+    #                         Without this Redis grows until the OS kills it.
+    # --maxmemory-policy allkeys-lru → when full, evict least recently used keys.
+    #                         Active sessions survive. Stale cache entries removed.
+    # --save 900 1          → RDB snapshot every 15 min if ≥1 key changed.
+    #                         Second safety net alongside AOF.
     command: >
       redis-server
       --requirepass ${REDIS_PASSWORD}
@@ -218,34 +230,6 @@ services:
       --maxmemory 1gb
       --maxmemory-policy allkeys-lru
       --save 900 1
-
-      # --requirepass         → require password auth. Without this anyone who
-      #                         reaches the Redis port can read/delete all data.
-
-      # --appendonly yes      → enable AOF (Append Only File) persistence.
-      #                         Every write is logged to appendonly.aof on disk.
-      #                         On restart Redis replays the file → no data lost.
-      #                         Without this: Redis restart = all sessions wiped,
-      #                         all users logged out simultaneously.
-
-      # --appendfsync everysec → flush AOF file to disk every 1 second.
-      #                         Best balance: at most 1 second of data lost on
-      #                         crash. "always" is safer but 10x slower.
-      #                         "no" is fastest but loses all data since last sync.
-
-      # --maxmemory 1gb       → hard cap Redis at 1GB RAM on our 8GB server.
-      #                         Without this Redis grows until the OS kills it
-      #                         (or kills your Node.js app to free memory).
-      #                         1GB is generous for sessions + cache at test scale.
-
-      # --maxmemory-policy allkeys-lru → when 1GB is reached, evict the Least
-      #                         Recently Used keys first. Active user sessions
-      #                         (accessed constantly) survive. Stale cached API
-      #                         responses (not touched in hours) get removed.
-
-      # --save 900 1          → also write an RDB snapshot every 15 minutes if
-      #                         at least 1 key changed. RDB = full point-in-time
-      #                         snapshot. Works alongside AOF as a second safety net.
 
     volumes:
       # Same principle as postgres — data lives outside the container.
