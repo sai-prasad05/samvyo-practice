@@ -118,6 +118,18 @@ services:
     <<: *common-env
     image: postgres:16-alpine      # Official Postgres 16 on Alpine Linux
 
+    ports:
+      # Expose postgres ONLY to the server's own localhost — NOT to the internet.
+      # "127.0.0.1:5432:5432" means:
+      #   - 127.0.0.1 = bind to localhost interface only (not 0.0.0.0 = everyone)
+      #   - first 5432 = port on the server's localhost
+      #   - second 5432 = port inside the postgres container
+      #
+      # WHY: Lets you connect via SSH tunnel from pgAdmin on your laptop.
+      # Without this, postgres is only reachable inside Docker's internal network.
+      # The database is never exposed directly to the public internet.
+      - "127.0.0.1:5432:5432"
+
     environment:
       POSTGRES_DB:       samvyo         # Creates this database on first start
       POSTGRES_USER:     samvyo         # Creates this user
