@@ -1,17 +1,1 @@
-# ── userlist.txt — PgBouncer authentication credentials ───────────────────────
-#
-# FORMAT: "username" "password"
-#
-# WHY THIS FILE EXISTS:
-# PgBouncer intercepts connections from Node.js BEFORE they reach PostgreSQL.
-# It needs to verify the username and password itself first.
-# This file tells PgBouncer which users are allowed and what their passwords are.
-#
-# IMPORTANT: The password here must match PG_PASSWORD in your .env file.
-# If you change PG_PASSWORD, update this file too and redeploy.
-#
-# In production (Day 6-7), use MD5 hashed passwords instead of plaintext.
-# For the test environment, plaintext is acceptable.
-#
-# Format: "username" "password"
 "samvyo" "samvyo_dev_pass"
